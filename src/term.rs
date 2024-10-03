@@ -1,13 +1,12 @@
+use crossterm::{
+    cursor::MoveTo,
+    style::{Attribute, Color, SetAttribute, SetForegroundColor},
+    terminal::{Clear, ClearType},
+    Command, QueueableCommand,
+};
 use std::{
     fmt, fs,
     io::{self, BufRead, StdoutLock, Write},
-};
-
-use crossterm::{
-    cursor::MoveTo,
-    style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor},
-    terminal::{Clear, ClearType},
-    Command, QueueableCommand,
 };
 
 pub struct MaxLenWriter<'a, 'b> {
@@ -93,20 +92,19 @@ pub fn progress_bar<'a>(
     total: u16,
     line_width: u16,
 ) -> io::Result<()> {
+    debug_assert!(total < 1000);
     debug_assert!(progress <= total);
 
     const PREFIX: &[u8] = b"Progress: [";
     const PREFIX_WIDTH: u16 = PREFIX.len() as u16;
-    // Leaving the last char empty (_) for `total` > 99.
-    const POSTFIX_WIDTH: u16 = "] xxx/xx exercises_".len() as u16;
+    const POSTFIX_WIDTH: u16 = "] xxx/xxx".len() as u16;
     const WRAPPER_WIDTH: u16 = PREFIX_WIDTH + POSTFIX_WIDTH;
     const MIN_LINE_WIDTH: u16 = WRAPPER_WIDTH + 4;
 
     if line_width < MIN_LINE_WIDTH {
         writer.write_ascii(b"Progress: ")?;
         // Integers are in ASCII.
-        writer.write_ascii(format!("{progress}/{total}").as_bytes())?;
-        return writer.write_ascii(b" exercises");
+        return writer.write_ascii(format!("{progress}/{total}").as_bytes());
     }
 
     let stdout = writer.stdout();
@@ -133,8 +131,9 @@ pub fn progress_bar<'a>(
         }
     }
 
-    stdout.queue(ResetColor)?;
-    write!(stdout, "] {progress:>3}/{total} exercises")
+    stdout.queue(SetForegroundColor(Color::Reset))?;
+
+    write!(stdout, "] {progress:>3}/{total}")
 }
 
 pub fn clear_terminal(stdout: &mut StdoutLock) -> io::Result<()> {
@@ -151,25 +150,29 @@ pub fn press_enter_prompt(stdout: &mut StdoutLock) -> io::Result<()> {
     stdout.write_all(b"\n")
 }
 
+/// Canonicalize, convert to string and remove verbatim part on Windows.
+pub fn canonicalize(path: &str) -> Option<String> {
+    fs::canonicalize(path)
+        .ok()?
+        .into_os_string()
+        .into_string()
+        .ok()
+        .map(|mut path| {
+            // Windows itself can't handle its verbatim paths.
+            if cfg!(windows) && path.as_bytes().starts_with(br"\\?\") {
+                path.drain(..4);
+            }
+
+            path
+        })
+}
+
 pub fn terminal_file_link<'a>(
     writer: &mut impl CountedWrite<'a>,
     path: &str,
+    canonical_path: &str,
     color: Color,
 ) -> io::Result<()> {
-    let canonical_path = fs::canonicalize(path).ok();
-
-    let Some(canonical_path) = canonical_path.as_deref().and_then(|p| p.to_str()) else {
-        return writer.write_str(path);
-    };
-
-    // Windows itself can't handle its verbatim paths.
-    #[cfg(windows)]
-    let canonical_path = if canonical_path.len() > 5 && &canonical_path[0..4] == r"\\?\" {
-        &canonical_path[4..]
-    } else {
-        canonical_path
-    };
-
     writer
         .stdout()
         .queue(SetForegroundColor(color))?

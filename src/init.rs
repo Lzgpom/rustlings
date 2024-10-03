@@ -130,6 +130,9 @@ pub fn init() -> Result<()> {
     fs::write("Cargo.toml", updated_cargo_toml)
         .context("Failed to create the file `rustlings/Cargo.toml`")?;
 
+    fs::write("rust-analyzer.toml", RUST_ANALYZER_TOML)
+        .context("Failed to create the file `rustlings/rust-analyzer.toml`")?;
+
     fs::write(".gitignore", GITIGNORE)
         .context("Failed to create the file `rustlings/.gitignore`")?;
 
@@ -168,6 +171,10 @@ const INIT_SOLUTION_FILE: &[u8] = b"fn main() {
     // It will be automatically filled after you finish the exercise.
 }
 ";
+
+pub const RUST_ANALYZER_TOML: &[u8] = br#"check.command = "clippy"
+check.extraArgs = ["--profile", "test"]
+"#;
 
 const GITIGNORE: &[u8] = b"Cargo.lock
 target/

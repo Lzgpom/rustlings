@@ -13,7 +13,7 @@ use std::{
 use crate::{
     app_state::AppState,
     exercise::Exercise,
-    term::{progress_bar, terminal_file_link, CountedWrite, MaxLenWriter},
+    term::{progress_bar, CountedWrite, MaxLenWriter},
 };
 
 use super::scroll_state::ScrollState;
@@ -37,19 +37,18 @@ pub enum Filter {
 pub struct ListState<'a> {
     /// Footer message to be displayed if not empty.
     pub message: String,
+    pub search_query: String,
     app_state: &'a mut AppState,
     scroll_state: ScrollState,
     name_col_padding: Vec<u8>,
     filter: Filter,
     term_width: u16,
     term_height: u16,
-    separator_line: Vec<u8>,
-    narrow_term: bool,
     show_footer: bool,
 }
 
 impl<'a> ListState<'a> {
-    pub fn new(app_state: &'a mut AppState, stdout: &mut StdoutLock) -> io::Result<Self> {
+    pub fn build(app_state: &'a mut AppState, stdout: &mut StdoutLock) -> Result<Self> {
         stdout.queue(Clear(ClearType::All))?;
 
         let name_col_title_len = 4;
@@ -65,11 +64,12 @@ impl<'a> ListState<'a> {
         let n_rows_with_filter = app_state.exercises().len();
         let selected = app_state.current_exercise_ind();
 
-        let (width, height) = terminal::size()?;
+        let (width, height) = terminal::size().context("Failed to get the terminal size")?;
         let scroll_state = ScrollState::new(n_rows_with_filter, Some(selected), 5);
 
         let mut slf = Self {
             message: String::with_capacity(128),
+            search_query: String::new(),
             app_state,
             scroll_state,
             name_col_padding,
@@ -77,8 +77,6 @@ impl<'a> ListState<'a> {
             // Set by `set_term_size`
             term_width: 0,
             term_height: 0,
-            separator_line: Vec::new(),
-            narrow_term: false,
             show_footer: true,
         };
 
@@ -96,18 +94,10 @@ impl<'a> ListState<'a> {
             return;
         }
 
-        let wide_help_footer_width = 95;
-        // The help footer is shorter when nothing is selected.
-        self.narrow_term = width < wide_help_footer_width && self.scroll_state.selected().is_some();
-
         let header_height = 1;
-        // 2 separator, 1 progress bar, 1-2 footer message.
-        let footer_height = 4 + u16::from(self.narrow_term);
+        // 1 progress bar, 2 footer message lines.
+        let footer_height = 3;
         self.show_footer = height > header_height + footer_height;
-
-        if self.show_footer {
-            self.separator_line = "─".as_bytes().repeat(width as usize);
-        }
 
         self.scroll_state.set_max_n_rows_to_display(
             height.saturating_sub(header_height + u16::from(self.show_footer) * footer_height)
@@ -168,7 +158,7 @@ impl<'a> ListState<'a> {
             if self.app_state.vs_code() {
                 writer.write_str(exercise.path)?;
             } else {
-                terminal_file_link(&mut writer, exercise.path, Color::Blue)?;
+                exercise.terminal_file_link(&mut writer)?;
             }
 
             next_ln(stdout)?;
@@ -208,9 +198,6 @@ impl<'a> ListState<'a> {
         }
 
         if self.show_footer {
-            stdout.write_all(&self.separator_line)?;
-            next_ln(stdout)?;
-
             progress_bar(
                 &mut MaxLenWriter::new(stdout, self.term_width as usize),
                 self.app_state.n_done(),
@@ -219,22 +206,15 @@ impl<'a> ListState<'a> {
             )?;
             next_ln(stdout)?;
 
-            stdout.write_all(&self.separator_line)?;
-            next_ln(stdout)?;
-
             let mut writer = MaxLenWriter::new(stdout, self.term_width as usize);
             if self.message.is_empty() {
                 // Help footer message
                 if self.scroll_state.selected().is_some() {
                     writer.write_str("↓/j ↑/k home/g end/G | <c>ontinue at | <r>eset exercise")?;
-                    if self.narrow_term {
-                        next_ln(stdout)?;
-                        writer = MaxLenWriter::new(stdout, self.term_width as usize);
+                    next_ln(stdout)?;
+                    writer = MaxLenWriter::new(stdout, self.term_width as usize);
 
-                        writer.write_ascii(b"filter ")?;
-                    } else {
-                        writer.write_ascii(b" | filter ")?;
-                    }
+                    writer.write_ascii(b"<s>earch | filter ")?;
                 } else {
                     // Nothing selected (and nothing shown), so only display filter and quit.
                     writer.write_ascii(b"filter ")?;
@@ -263,17 +243,14 @@ impl<'a> ListState<'a> {
                 }
 
                 writer.write_ascii(b" | <q>uit list")?;
-                next_ln(stdout)?;
             } else {
                 writer.stdout.queue(SetForegroundColor(Color::Magenta))?;
                 writer.write_str(&self.message)?;
                 stdout.queue(ResetColor)?;
                 next_ln(stdout)?;
-
-                if self.narrow_term {
-                    next_ln(stdout)?;
-                }
             }
+
+            next_ln(stdout)?;
         }
 
         stdout.queue(EndSynchronizedUpdate)?.flush()
@@ -368,6 +345,33 @@ impl<'a> ListState<'a> {
         )?;
 
         Ok(())
+    }
+
+    pub fn apply_search_query(&mut self) {
+        self.message.push_str("search:");
+        self.message.push_str(&self.search_query);
+        self.message.push('|');
+
+        if self.search_query.is_empty() {
+            return;
+        }
+
+        let is_search_result = |exercise: &Exercise| exercise.name.contains(&self.search_query);
+        let mut iter = self.app_state.exercises().iter();
+        let ind = match self.filter {
+            Filter::None => iter.position(is_search_result),
+            Filter::Done => iter
+                .filter(|exercise| exercise.done)
+                .position(is_search_result),
+            Filter::Pending => iter
+                .filter(|exercise| !exercise.done)
+                .position(is_search_result),
+        };
+
+        match ind {
+            Some(exercise_ind) => self.scroll_state.set_selected(exercise_ind),
+            None => self.message.push_str(" (not found)"),
+        }
     }
 
     // Return `true` if there was something to select.

@@ -11,7 +11,6 @@ use std::{
 use crate::{
     app_state::{AppState, ExercisesProgress},
     exercise::{solution_link_line, RunnableExercise, OUTPUT_CAPACITY},
-    term::terminal_file_link,
 };
 
 pub fn run(app_state: &mut AppState) -> Result<()> {
@@ -26,7 +25,9 @@ pub fn run(app_state: &mut AppState) -> Result<()> {
         app_state.set_pending(app_state.current_exercise_ind())?;
 
         stdout.write_all(b"Ran ")?;
-        terminal_file_link(&mut stdout, app_state.current_exercise().path, Color::Blue)?;
+        app_state
+            .current_exercise()
+            .terminal_file_link(&mut stdout)?;
         stdout.write_all(b" with errors\n")?;
         exit(1);
     }
@@ -43,10 +44,12 @@ pub fn run(app_state: &mut AppState) -> Result<()> {
         stdout.write_all(b"\n")?;
     }
 
-    match app_state.done_current_exercise(&mut stdout)? {
-        ExercisesProgress::CurrentPending | ExercisesProgress::NewPending => {
+    match app_state.done_current_exercise::<false>(&mut stdout)? {
+        ExercisesProgress::NewPending | ExercisesProgress::CurrentPending => {
             stdout.write_all(b"Next exercise: ")?;
-            terminal_file_link(&mut stdout, app_state.current_exercise().path, Color::Blue)?;
+            app_state
+                .current_exercise()
+                .terminal_file_link(&mut stdout)?;
             stdout.write_all(b"\n")?;
         }
         ExercisesProgress::AllDone => (),

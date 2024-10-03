@@ -3,7 +3,7 @@ use std::{
     env,
     fs::{File, OpenOptions},
     io::{self, Read, Seek, StdoutLock, Write},
-    path::Path,
+    path::{Path, MAIN_SEPARATOR_STR},
     process::{Command, Stdio},
     thread,
 };
@@ -15,6 +15,7 @@ use crate::{
     embedded::EMBEDDED_FILES,
     exercise::{Exercise, RunnableExercise},
     info_file::ExerciseInfo,
+    term,
 };
 
 const STATE_FILE_NAME: &str = ".rustlings-state.txt";
@@ -23,10 +24,10 @@ const STATE_FILE_NAME: &str = ".rustlings-state.txt";
 pub enum ExercisesProgress {
     // All exercises are done.
     AllDone,
-    // The current exercise failed and is still pending.
-    CurrentPending,
     // A new exercise is now pending.
     NewPending,
+    // The current exercise is still pending.
+    CurrentPending,
 }
 
 pub enum StateFileStatus {
@@ -71,6 +72,7 @@ impl AppState {
                 format!("Failed to open or create the state file {STATE_FILE_NAME}")
             })?;
 
+        let dir_canonical_path = term::canonicalize("exercises");
         let mut exercises = exercise_infos
             .into_iter()
             .map(|exercise_info| {
@@ -82,10 +84,32 @@ impl AppState {
                 let dir = exercise_info.dir.map(|dir| &*dir.leak());
                 let hint = exercise_info.hint.leak().trim_ascii();
 
+                let canonical_path = dir_canonical_path.as_deref().map(|dir_canonical_path| {
+                    let mut canonical_path;
+                    if let Some(dir) = dir {
+                        canonical_path = String::with_capacity(
+                            2 + dir_canonical_path.len() + dir.len() + name.len(),
+                        );
+                        canonical_path.push_str(dir_canonical_path);
+                        canonical_path.push_str(MAIN_SEPARATOR_STR);
+                        canonical_path.push_str(dir);
+                    } else {
+                        canonical_path =
+                            String::with_capacity(1 + dir_canonical_path.len() + name.len());
+                        canonical_path.push_str(dir_canonical_path);
+                    }
+
+                    canonical_path.push_str(MAIN_SEPARATOR_STR);
+                    canonical_path.push_str(name);
+                    canonical_path.push_str(".rs");
+                    canonical_path
+                });
+
                 Exercise {
                     dir,
                     name,
                     path,
+                    canonical_path,
                     test: exercise_info.test,
                     strict_clippy: exercise_info.strict_clippy,
                     hint,
@@ -331,7 +355,7 @@ impl AppState {
             })
     }
 
-    /// Official exercises: Dump the solution file form the binary and return its path.
+    /// Official exercises: Dump the solution file from the binary and return its path.
     /// Third-party exercises: Check if a solution file exists and return its path in that case.
     pub fn current_solution_path(&self) -> Result<Option<String>> {
         if cfg!(debug_assertions) {
@@ -357,19 +381,26 @@ impl AppState {
 
     // Return the exercise index of the first pending exercise found.
     fn check_all_exercises(&self, stdout: &mut StdoutLock) -> Result<Option<usize>> {
-        stdout.write_all(RERUNNING_ALL_EXERCISES_MSG)?;
+        stdout.write_all(FINAL_CHECK_MSG)?;
         let n_exercises = self.exercises.len();
 
         let status = thread::scope(|s| {
             let handles = self
                 .exercises
                 .iter()
-                .map(|exercise| s.spawn(|| exercise.run_exercise(None, &self.cmd_runner)))
+                .map(|exercise| {
+                    thread::Builder::new()
+                        .spawn_scoped(s, || exercise.run_exercise(None, &self.cmd_runner))
+                })
                 .collect::<Vec<_>>();
 
-            for (exercise_ind, handle) in handles.into_iter().enumerate() {
+            for (exercise_ind, spawn_res) in handles.into_iter().enumerate() {
                 write!(stdout, "\rProgress: {exercise_ind}/{n_exercises}")?;
                 stdout.flush()?;
+
+                let Ok(handle) = spawn_res else {
+                    return Ok(AllExercisesCheck::CheckedUntil(exercise_ind));
+                };
 
                 let Ok(success) = handle.join().unwrap() else {
                     return Ok(AllExercisesCheck::CheckedUntil(exercise_ind));
@@ -410,7 +441,10 @@ impl AppState {
     /// Mark the current exercise as done and move on to the next pending exercise if one exists.
     /// If all exercises are marked as done, run all of them to make sure that they are actually
     /// done. If an exercise which is marked as done fails, mark it as pending and continue on it.
-    pub fn done_current_exercise(&mut self, stdout: &mut StdoutLock) -> Result<ExercisesProgress> {
+    pub fn done_current_exercise<const CLEAR_BEFORE_FINAL_CHECK: bool>(
+        &mut self,
+        stdout: &mut StdoutLock,
+    ) -> Result<ExercisesProgress> {
         let exercise = &mut self.exercises[self.current_exercise_ind];
         if !exercise.done {
             exercise.done = true;
@@ -420,6 +454,12 @@ impl AppState {
         if let Some(ind) = self.next_pending_exercise_ind() {
             self.set_current_exercise_ind(ind)?;
             return Ok(ExercisesProgress::NewPending);
+        }
+
+        if CLEAR_BEFORE_FINAL_CHECK {
+            clear_terminal(stdout)?;
+        } else {
+            stdout.write_all(b"\n")?;
         }
 
         if let Some(pending_exercise_ind) = self.check_all_exercises(stdout)? {
@@ -451,8 +491,7 @@ impl AppState {
 
 const BAD_INDEX_ERR: &str = "The current exercise index is higher than the number of exercises";
 const STATE_FILE_HEADER: &[u8] = b"DON'T EDIT THIS FILE!\n\n";
-const RERUNNING_ALL_EXERCISES_MSG: &[u8] = b"
-All exercises seem to be done.
+const FINAL_CHECK_MSG: &[u8] = b"All exercises seem to be done.
 Recompiling and running all exercises to make sure that all of them are actually done.
 ";
 const FENISH_LINE: &str = "+----------------------------------------------------+
@@ -486,6 +525,7 @@ mod tests {
             dir: None,
             name: "0",
             path: "exercises/0.rs",
+            canonical_path: None,
             test: false,
             strict_clippy: false,
             hint: "",
